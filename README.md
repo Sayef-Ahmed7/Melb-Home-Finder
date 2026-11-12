@@ -25,6 +25,7 @@ pip install -r requirements.txt
 python clean_data.py          # tidy CSVs in data/clean/
 python prepare_boundaries.py  # map shapes (needs the ABS zip only the first time)
 python make_map.py            # interactive map -> maps/suburb_map.html
+streamlit run app.py          # the web app
 ```
 `data/boundaries/vic_suburbs.geojson` is included, so the ABS zip is only needed to rebuild it.
 
@@ -41,4 +42,5 @@ python make_map.py            # interactive map -> maps/suburb_map.html
 - [x] Interactive map of rent and crime
 - [ ] Exploratory analysis
 - [ ] Rent forecast + suburb clustering
-- [ ] Streamlit app
+- [x] Streamlit app (budget, home type, region, priority sliders, map, area details)
+- [ ] Deploy to Streamlit Community Cloud

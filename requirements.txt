@@ -2,3 +2,5 @@ pandas
 openpyxl
 geopandas
 folium
+streamlit
+streamlit-folium
