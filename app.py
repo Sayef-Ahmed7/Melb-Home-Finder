@@ -166,6 +166,11 @@ with left:
     m = folium.Map(tiles=BASEMAP, attr=BASEMAP_ATTR, min_zoom=7, max_zoom=15, zoom_snap=0.25,
                    max_bounds=True, min_lat=-39.3, max_lat=-33.9, min_lon=140.8, max_lon=150.1)
     m.fit_bounds([[miny, minx], [maxy, maxx]], padding=(15, 15))
+    # smaller credits line, without the optional "Leaflet" link (tile credits must stay)
+    m.get_root().header.add_child(folium.Element(
+        "<style>.leaflet-control-attribution{font-size:9px!important;opacity:.8}</style>"))
+    m.get_root().script.add_child(folium.Element(
+        f"{m.get_name()}.attributionControl.setPrefix(false);"))
     cmap = cm.LinearColormap(["#fde0c5", "#facba6", "#74c476", "#006d2c"],
                              vmin=0, vmax=100, caption="Match score (higher = better fit)")
 
@@ -190,26 +195,41 @@ with left:
                      "Rent change 5 yrs (%)", "Match score"],
             localize=True, sticky=True),
     ).add_to(m)
-    cmap.add_to(m)
-    st.caption("🟩 Coloured = within budget (greener = better match) · ⬜ Grey = over budget · "
-               "**bold outline** = your top results · blank map = no rent data · hover for details")
+    st.markdown(
+        "<div style='font-size:0.85rem;color:#555;margin-bottom:6px'>"
+        "<b>Match score</b> &nbsp;0 <span style='display:inline-block;width:160px;height:10px;"
+        "vertical-align:middle;border-radius:3px;background:linear-gradient(90deg,"
+        "#fde0c5,#facba6,#74c476,#006d2c)'></span> 100 &nbsp;·&nbsp; "
+        "<span style='display:inline-block;width:12px;height:10px;background:#9e9e9e;"
+        "vertical-align:middle'></span> over budget &nbsp;·&nbsp; bold outline = top results"
+        " &nbsp;·&nbsp; blank = no rent data</div>", unsafe_allow_html=True)
     st_folium(m, height=560, use_container_width=True, returned_objects=[])
 
 with right:
     st.subheader(f"Top {min(top_n, len(matches))} matches")
     for i, r in enumerate(matches.head(top_n).itertuples(), 1):
         with st.container(border=True):
-            a, b = st.columns([3, 1])
-            a.markdown(f"**{i}. {r.rent_area}**  \n<span style='color:gray'>{r.region} · "
-                       f"${budget - r.rent:.0f} under budget</span>", unsafe_allow_html=True)
-            b.metric("Match", f"{r.match:.0f}")
-            x, y, z = st.columns(3)
-            x.metric("Rent /wk", f"${r.rent:.0f}")
             n = getattr(r, "n_" + r.rent_type.lower().replace(" ", "_"))
-            x.caption(f"{r.rent_type} · {n:,.0f} leases" + (" ⚠️ few" if n < MIN_LEASES else ""))
-            y.metric("Crime /1k", f"{r.crime_per_1000:.0f}",
-                     f"{r.crime_change_1y_pct:+.0f}% 1yr", delta_color="inverse")
-            z.metric("Rent 5yr", f"{r.rent_change_5y_pct:+.0f}%")
+            few = " ⚠️ few leases" if n < MIN_LEASES else ""
+            crime_trend = r.crime_change_1y_pct
+            arrow, colour = ("▼", "#2e7d32") if crime_trend < 0 else ("▲", "#c62828")
+            st.markdown(f"""
+<div style="display:flex;justify-content:space-between;align-items:flex-start">
+  <div><b>{i}. {r.rent_area}</b><br>
+    <span style="color:gray;font-size:0.85rem">{r.region} · ${budget - r.rent:.0f} under budget</span></div>
+  <div style="text-align:center;min-width:56px"><span style="font-size:0.75rem;color:gray">Match</span><br>
+    <span style="font-size:1.6rem;font-weight:600">{r.match:.0f}</span></div>
+</div>
+<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px;margin-top:6px">
+  <div><span style="font-size:0.75rem;color:gray">Rent /wk</span><br>
+    <span style="font-size:1.25rem;font-weight:600">${r.rent:.0f}</span><br>
+    <span style="font-size:0.75rem;color:gray">{r.rent_type} · {n:,.0f} leases{few}</span></div>
+  <div><span style="font-size:0.75rem;color:gray">Crime /1k</span><br>
+    <span style="font-size:1.25rem;font-weight:600">{r.crime_per_1000:.0f}</span><br>
+    <span style="font-size:0.75rem;color:{colour}">{arrow} {abs(crime_trend):.0f}% in 1 yr</span></div>
+  <div><span style="font-size:0.75rem;color:gray">Rent 5 yrs</span><br>
+    <span style="font-size:1.25rem;font-weight:600">{r.rent_change_5y_pct:+.0f}%</span></div>
+</div>""", unsafe_allow_html=True)
             if r.crime_per_1000 > CENTRE_THRESHOLD:
                 st.caption("⚠️ Busy town/city centre: visitors inflate the per-resident crime rate.")
 
