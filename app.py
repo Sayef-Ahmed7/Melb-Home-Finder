@@ -156,23 +156,34 @@ if matches.empty:
 
 
 # ---------------------------------------------------------------------------
-# Map + ranked list
+# Selection state (shared by the map, the cards and the details view)
 # ---------------------------------------------------------------------------
 shown = matches.head(top_n)["rent_area"].tolist()
 if st.session_state.get("selected") not in shown:   # filters changed -> clear selection
     st.session_state["selected"] = None
+if st.session_state.get("detail_pick") not in matches["rent_area"].tolist():
+    st.session_state["detail_pick"] = matches["rent_area"].iloc[0]
 selected = st.session_state["selected"]
 
 
 def toggle_selected(area):
     st.session_state["selected"] = None if st.session_state.get("selected") == area else area
     if st.session_state["selected"]:
-        st.session_state["detail_pick"] = area   # also open it in Area details
+        st.session_state["detail_pick"] = area   # keep the details view in sync
 
 
-left, right = st.columns([3, 2], gap="large")
+def show_details(area):
+    st.session_state["detail_pick"] = area
 
-with left:
+
+# ---------------------------------------------------------------------------
+# View switch: map or area details
+# ---------------------------------------------------------------------------
+view = st.radio("View", ["🗺️ Map", "📊 Area details"], horizontal=True,
+                label_visibility="collapsed", key="view")
+
+
+def draw_map():
     # zoom to the areas that fit the budget; panning is limited to Victoria
     minx, miny, maxx, maxy = matches.total_bounds
     m = folium.Map(tiles=BASEMAP, attr=BASEMAP_ATTR, min_zoom=7, max_zoom=15, zoom_snap=0.25,
@@ -180,14 +191,13 @@ with left:
     m.fit_bounds([[miny, minx], [maxy, maxx]], padding=(15, 15))
     # smaller credits line, without the optional "Leaflet" link (tile credits must stay)
     m.get_root().header.add_child(folium.Element(
-        "<style>.leaflet-control-attribution{font-size:9px!important;opacity:.8}</style>"))
-    m.get_root().script.add_child(folium.Element(
-        f"{m.get_name()}.attributionControl.setPrefix(false);"))
-    cmap = cm.LinearColormap(["#fde0c5", "#facba6", "#74c476", "#006d2c"],
-                             vmin=0, vmax=100, caption="Match score (higher = better fit)")
+        "<style>.leaflet-control-attribution{font-size:9px!important;opacity:.8}"
+        ".leaflet-control-attribution a[href*='leafletjs'],"
+        ".leaflet-control-attribution a[href*='leafletjs'] + span{display:none}</style>"))
+    cmap = cm.LinearColormap(["#fde0c5", "#facba6", "#74c476", "#006d2c"], vmin=0, vmax=100)
 
-    map_df = df[["rent_area", "rent", "rent_type", "crime_per_1000", "rent_change_5y_pct", "match",
-                 "geometry"]].copy()
+    map_df = df[["rent_area", "rent", "rent_type", "crime_per_1000", "rent_change_5y_pct",
+                 "match", "geometry"]].copy()
     map_df["in_budget"] = mask
     # outline only the chosen area, or all top results if none is chosen
     map_df["top"] = (map_df["rent_area"] == selected) if selected else map_df["rent_area"].isin(shown)
@@ -216,12 +226,48 @@ with left:
         "vertical-align:middle'></span> over budget &nbsp;·&nbsp; bold outline = "
         + (f"<b>{selected}</b>" if selected else "top results") +
         " &nbsp;·&nbsp; blank = no rent data</div>", unsafe_allow_html=True)
-    st_folium(m, height=560, use_container_width=True, returned_objects=[])
+    st_folium(m, height=600, use_container_width=True, returned_objects=[])
 
-with right:
-    st.subheader(f"Top {min(top_n, len(matches))} matches")
-    for i, r in enumerate(matches.head(top_n).itertuples(), 1):
-        with st.container(border=True):
+
+def draw_details():
+    pick = st.selectbox("Choose an area", matches["rent_area"].tolist(), key="detail_pick")
+    row = df[df["rent_area"] == pick].iloc[0]
+    suburbs = lookup.loc[lookup["rent_area"] == pick, "suburb"].tolist()
+    st.caption(f"Includes: {', '.join(suburbs)} · Population {row['population_2021']:,.0f} (2021)")
+
+    d1, d2 = st.columns(2, gap="large")
+    with d1:
+        pick_type = row["rent_type"]
+        st.markdown(f"**Median weekly rent: {pick_type.lower()}**")
+        hist = rent[(rent["rent_area"] == pick) & (rent["dwelling_type"] == pick_type)]
+        st.line_chart(hist.set_index("quarter")["median_rent"], height=320, y_label="$ per week")
+        if hist["median_rent"].isna().any():
+            st.caption("Gaps = quarters with too few new leases for a median to be published.")
+    with d2:
+        st.markdown("**Crime incidents per year (to June)**")
+        c = crime[crime["suburb"].isin(suburbs)].copy()
+        c["type"] = c["offence_division"].str[0].map(
+            {"A": "Against the person", "B": "Property"}).fillna("Other")
+        yearly = c.pivot_table(index="year", columns="type", values="incidents", aggfunc="sum")
+        st.bar_chart(yearly, height=320, y_label="Incidents")
+
+
+if view == "🗺️ Map":
+    draw_map()
+else:
+    draw_details()
+
+
+# ---------------------------------------------------------------------------
+# Ranked results as a grid of cards
+# ---------------------------------------------------------------------------
+st.subheader(f"Top {min(top_n, len(matches))} matches")
+CARDS_PER_ROW = 3
+top_rows = list(matches.head(top_n).itertuples())
+for start in range(0, len(top_rows), CARDS_PER_ROW):
+    cols = st.columns(CARDS_PER_ROW)
+    for col, (i, r) in zip(cols, enumerate(top_rows[start:start + CARDS_PER_ROW], start + 1)):
+        with col.container(border=True):
             n = getattr(r, "n_" + r.rent_type.lower().replace(" ", "_"))
             few = " ⚠️ few leases" if n < MIN_LEASES else ""
             crime_trend = r.crime_change_1y_pct
@@ -244,40 +290,20 @@ with right:
 </div>
 <div style="font-size:0.78rem;color:gray;margin-top:4px">{r.rent_type} · {n:,.0f} leases in the past year{few}</div>""",
                         unsafe_allow_html=True)
-            is_sel = r.rent_area == selected
-            st.button("📍 Shown on map · click to show all" if is_sel else "📍 Show on map",
-                      key=f"sel_{r.rent_area}", on_click=toggle_selected, args=(r.rent_area,),
-                      type="primary" if is_sel else "secondary", use_container_width=True)
             if r.crime_per_1000 > CENTRE_THRESHOLD:
                 st.caption("⚠️ Busy town/city centre: visitors inflate the per-resident crime rate.")
+            if view == "🗺️ Map":
+                is_sel = r.rent_area == selected
+                st.button("📍 Shown on map · click to show all" if is_sel else "📍 Show on map",
+                          key=f"sel_{r.rent_area}", on_click=toggle_selected, args=(r.rent_area,),
+                          type="primary" if is_sel else "secondary", use_container_width=True)
+            else:
+                is_pick = r.rent_area == st.session_state["detail_pick"]
+                st.button("📊 Showing details" if is_pick else "📊 Show details",
+                          key=f"det_{r.rent_area}", on_click=show_details, args=(r.rent_area,),
+                          type="primary" if is_pick else "secondary", use_container_width=True)
 
-
-# ---------------------------------------------------------------------------
-# Area details
-# ---------------------------------------------------------------------------
 st.divider()
-st.subheader("Area details")
-if st.session_state.get("detail_pick") not in matches["rent_area"].tolist():
-    st.session_state["detail_pick"] = matches["rent_area"].iloc[0]
-pick = st.selectbox("Choose an area", matches["rent_area"].tolist(), key="detail_pick")
-row = df[df["rent_area"] == pick].iloc[0]
-suburbs = lookup.loc[lookup["rent_area"] == pick, "suburb"].tolist()
-st.caption(f"Includes: {', '.join(suburbs)} · Population {row['population_2021']:,.0f} (2021)")
-
-d1, d2 = st.columns(2)
-with d1:
-    pick_type = row["rent_type"]
-    st.markdown(f"**Median weekly rent: {pick_type.lower()}**")
-    hist = rent[(rent["rent_area"] == pick) & (rent["dwelling_type"] == pick_type)]
-    st.line_chart(hist.set_index("quarter")["median_rent"], height=280, y_label="$ per week")
-with d2:
-    st.markdown("**Crime incidents per year (to June)**")
-    c = crime[crime["suburb"].isin(suburbs)].copy()
-    c["type"] = c["offence_division"].str[0].map(
-        {"A": "Against the person", "B": "Property"}).fillna("Other")
-    yearly = c.pivot_table(index="year", columns="type", values="incidents", aggfunc="sum")
-    st.bar_chart(yearly, height=280, y_label="Incidents")
-
 with st.expander("How the match score works"):
     st.markdown(
         "1. **Filter**: keep areas whose median rent for your home type is within budget. "
