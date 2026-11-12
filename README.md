@@ -9,8 +9,13 @@ Find Victorian suburbs that fit your budget, ranked by rent and safety.
 |---|---|---|
 | Median weekly rent by suburb (2000–2026) | Homes Victoria Rental Report – Moving Annual Rents by Suburb | CC BY 4.0 |
 | Criminal incidents by suburb (2017–2026) | Crime Statistics Agency Victoria – Criminal Incidents by LGA | CC BY 4.0 |
+| Population by suburb (2021) | ABS Census 2021 General Community Profile, Suburbs and Localities (G01) | CC BY 4.0 |
 
 Raw files are in `data/`. Crime data © Crime Statistics Agency (CSA).
+
+## Notes
+- Crime rates use 2021 Census population (latest suburb-level count), so recent growth areas may show slightly inflated rates.
+- Some rent areas group several suburbs (e.g. Carlton-Parkville); their crime and population are summed across those suburbs.
 
 ## Setup
 ```bash
@@ -18,7 +23,7 @@ pip install -r requirements.txt
 python clean_data.py
 ```
 This creates tidy CSVs in `data/clean/`:
-- `area_summary.csv` – one row per rent area: rent, rent growth, crime, crime trend
+- `area_summary.csv` – one row per rent area: rent, rent growth, crime rate per 1,000 residents, crime trend
 - `rent_long.csv` – rent history by area, dwelling type and quarter
 - `crime_suburb.csv` – incidents by suburb, year and offence type
 - `suburb_lookup.csv` – which suburbs belong to each rent area
@@ -26,7 +31,7 @@ This creates tidy CSVs in `data/clean/`:
 ## Roadmap
 - [x] Collect rent and crime data
 - [x] Clean and merge
-- [ ] Add population for crime rates per 1,000 residents
+- [x] Add population for crime rates per 1,000 residents
 - [ ] Exploratory analysis and maps
 - [ ] Rent forecast + suburb clustering
 - [ ] Streamlit app

@@ -3,6 +3,8 @@ Melbourne Suburb Finder - Step 2: clean and merge
 -------------------------------------------------
 Inputs  (in data/):  rent.xlsx  (Homes Victoria moving annual rents by suburb)
                      crime.xlsx (CSA criminal incidents by LGA, Table 03 = suburb level)
+                     census/2021Census_G01_VIC_SAL.csv + census/2021Census_geog_desc.xlsx
+                                (ABS Census 2021 population by suburb)
 Outputs (in data/clean/):
     rent_long.csv       one row per rent area x dwelling type x quarter
     crime_suburb.csv    one row per suburb x year x offence division
@@ -71,6 +73,25 @@ def load_crime() -> pd.DataFrame:
 
 
 # ---------------------------------------------------------------------------
+# 2b. POPULATION - ABS Census 2021, Suburbs and Localities (SAL)
+# ---------------------------------------------------------------------------
+def load_population() -> pd.DataFrame:
+    pop = pd.read_csv(DATA / "census" / "2021Census_G01_VIC_SAL.csv",
+                      usecols=["SAL_CODE_2021", "Tot_P_P"])
+    geo = pd.read_excel(DATA / "census" / "2021Census_geog_desc.xlsx",
+                        sheet_name="2021_ASGS_Non_ABS_Structures")
+    geo = geo[geo["ASGS_Structure"] == "SAL"]
+    # same-name localities: keep the one in a rent area (Geelong's Newtown, not the rural one)
+    geo = geo[geo["Census_Name_2021"] != "Newtown (Golden Plains - Vic.)"]
+    pop = pop.merge(geo, left_on="SAL_CODE_2021", right_on="Census_Code_2021")
+    # "Richmond (Vic.)" / "Hillside (Melton - Vic.)" -> "Richmond" / "Hillside"
+    pop["suburb"] = pop["Census_Name_2021"].str.replace(r"\s*\(.*\)$", "", regex=True).str.strip()
+    pop = (pop.groupby("suburb", as_index=False)
+              .agg(population=("Tot_P_P", "sum"), area_sqkm=("Area sqkm", "sum")))
+    return pop
+
+
+# ---------------------------------------------------------------------------
 # 3. LOOKUP - rent areas are groups like "Carlton-Parkville"; crime is per suburb
 # ---------------------------------------------------------------------------
 # rent-name part -> crime suburb name(s), for the few that don't match directly
@@ -115,7 +136,7 @@ def build_lookup(rent: pd.DataFrame, crime: pd.DataFrame) -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 # 4. SUMMARY - one row per rent area
 # ---------------------------------------------------------------------------
-def build_summary(rent, crime, lookup) -> pd.DataFrame:
+def build_summary(rent, crime, lookup, pop) -> pd.DataFrame:
     latest_q = rent["quarter"].max()
     q_1y = latest_q - pd.DateOffset(years=1) + pd.offsets.MonthEnd(0)
     q_5y = latest_q - pd.DateOffset(years=5) + pd.offsets.MonthEnd(0)
@@ -147,6 +168,12 @@ def build_summary(rent, crime, lookup) -> pd.DataFrame:
     summary["crime_property_pct"] = summary["rent_area"].map(
         div.filter(like="B ").sum(axis=1) / div.sum(axis=1) * 100).round(1)
 
+    # population (Census 2021) -> crime rate per 1,000 residents
+    p = lookup.merge(pop, on="suburb", how="left").groupby("rent_area")
+    summary["population_2021"] = summary["rent_area"].map(p["population"].sum())
+    summary["area_sqkm"] = summary["rent_area"].map(p["area_sqkm"].sum()).round(1)
+    summary["crime_per_1000"] = (summary["crime_incidents"] / summary["population_2021"] * 1000).round(1)
+
     summary["n_suburbs_matched"] = summary["rent_area"].map(lookup.groupby("rent_area").size())
     summary.attrs["latest"] = (latest_q.strftime("%b %Y"), yr)
     return summary.sort_values(["region", "rent_area"])
@@ -156,8 +183,12 @@ def build_summary(rent, crime, lookup) -> pd.DataFrame:
 def main():
     print("Loading rent ..."); rent = load_rent()
     print("Loading crime (big sheet, ~30s) ..."); crime = load_crime()
+    print("Loading population ..."); pop = load_population()
     print("Matching suburbs ..."); lookup = build_lookup(rent, crime)
-    summary = build_summary(rent, crime, lookup)
+    lookup = lookup.merge(pop[["suburb", "population"]], on="suburb", how="left")
+    if lookup["population"].isna().any():
+        print("  ! no population for:", lookup.loc[lookup["population"].isna(), "suburb"].tolist())
+    summary = build_summary(rent, crime, lookup.drop(columns="population"), pop)
 
     rent.to_csv(OUT / "rent_long.csv", index=False)
     crime.to_csv(OUT / "crime_suburb.csv", index=False)
@@ -169,6 +200,7 @@ def main():
           f"{rent['quarter'].min():%b %Y} - {rent['quarter'].max():%b %Y})")
     print(f"crime_suburb:  {len(crime):,} rows  ({crime['suburb'].nunique()} suburbs, "
           f"{crime['year'].min()}-{crime['year'].max()})")
+    print(f"population:    {len(pop):,} Victorian suburbs (Census 2021)")
     print(f"suburb_lookup: {len(lookup)} suburbs mapped to {lookup['rent_area'].nunique()} rent areas")
     print(f"area_summary:  {len(summary)} areas  (rent {q}, crime year ending June {yr})")
     print(f"\nSaved to {OUT}/")
