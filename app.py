@@ -31,6 +31,11 @@ def load_data():
         prepare_boundaries.main()
     areas = gpd.read_file(CLEAN / "rent_areas.geojson")
     rent = pd.read_csv(CLEAN / "rent_long.csv", parse_dates=["quarter"])
+    # number of new leases behind each latest median, one column per home type
+    latest = rent[rent["quarter"] == rent["quarter"].max()]
+    counts = latest.pivot_table(index="rent_area", columns="dwelling_type", values="bond_count")
+    counts.columns = ["n_" + c.lower().replace(" ", "_") for c in counts.columns]
+    areas = areas.merge(counts, left_on="rent_area", right_index=True, how="left")
     crime = pd.read_csv(CLEAN / "crime_suburb.csv")
     lookup = pd.read_csv(CLEAN / "suburb_lookup.csv")
     return areas, rent, crime, lookup
@@ -38,8 +43,10 @@ def load_data():
 
 areas, rent, crime, lookup = load_data()
 
+CHEAPEST = "Cheapest available (any type)"
 HOME_TYPES = {
-    "Any (all properties)": ("rent_all_properties", "All properties"),
+    CHEAPEST: (None, None),
+    "Typical home (all types combined)": ("rent_all_properties", "All properties"),
     "1 bedroom flat": ("rent_1_bedroom_flat", "1 bedroom flat"),
     "2 bedroom flat": ("rent_2_bedroom_flat", "2 bedroom flat"),
     "3 bedroom flat": ("rent_3_bedroom_flat", "3 bedroom flat"),
@@ -47,7 +54,17 @@ HOME_TYPES = {
     "3 bedroom house": ("rent_3_bedroom_house", "3 bedroom house"),
     "4 bedroom house": ("rent_4_bedroom_house", "4 bedroom house"),
 }
+MIN_LEASES = 30         # ignore home types with fewer new leases than this in "cheapest"
 CENTRE_THRESHOLD = 200  # crime per 1,000 above this is usually a busy town/city centre
+MELBOURNE_REGIONS = {
+    "Inner Melbourne", "Inner Eastern Melbourne", "Southern Melbourne",
+    "Outer Western Melbourne", "North Western Melbourne", "North Eastern Melbourne",
+    "Outer Eastern Melbourne", "South Eastern Melbourne", "Mornington Peninsula",
+}
+# light grey basemap (no API key) so the coloured areas stand out
+BASEMAP = ("https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/"
+           "World_Light_Gray_Base/MapServer/tile/{z}/{y}/{x}")
+BASEMAP_ATTR = "Tiles &copy; Esri &mdash; Esri, HERE, Garmin, OpenStreetMap contributors"
 
 
 # ---------------------------------------------------------------------------
@@ -60,13 +77,20 @@ with st.sidebar:
     home_label = st.selectbox("Home type", list(HOME_TYPES))
     rent_col, rent_sheet = HOME_TYPES[home_label]
 
-    regions = st.multiselect("Regions (leave empty for all)", sorted(areas["region"].unique()))
+    include_regional = st.toggle("Include regional Victoria", value=False,
+                                 help="Geelong, Ballarat, Bendigo and other regional centres")
+    region_options = sorted(r for r in areas["region"].unique()
+                            if include_regional or r in MELBOURNE_REGIONS)
+    regions = st.multiselect("Regions (leave empty for all)", region_options)
 
-    st.subheader("What matters most?")
-    w_afford = st.slider("Affordability", 0, 10, 5)
-    w_safety = st.slider("Safety", 0, 10, 5)
-    w_stable = st.slider("Rent stability", 0, 10, 3,
-                         help="Prefers areas where rent has risen less over 5 years")
+    st.subheader("How important is…")
+    st.caption("Set how much each factor counts towards the match score. "
+               "*Not important* ignores it completely.")
+    LEVELS = {"Not important": 0, "A little": 1, "Somewhat": 2, "Important": 3, "Very important": 4}
+    w_afford = LEVELS[st.select_slider("💰 Low rent", list(LEVELS), value="Important")]
+    w_safety = LEVELS[st.select_slider("🛡️ Low crime", list(LEVELS), value="Important")]
+    w_stable = LEVELS[st.select_slider("📈 Stable rent", list(LEVELS), value="Somewhat",
+                      help="Prefers areas where rent has risen less over the last 5 years")]
     top_n = st.slider("Results to show", 5, 30, 10)
 
 
@@ -74,7 +98,18 @@ with st.sidebar:
 # Scoring
 # ---------------------------------------------------------------------------
 df = areas.copy()
-df["rent"] = df[rent_col]
+TYPE_COLS = {sheet: col for col, sheet in HOME_TYPES.values() if sheet not in (None, "All properties")}
+if home_label == CHEAPEST:
+    # cheapest home type with a published median in each area
+    type_rents = df[list(TYPE_COLS.values())].copy()
+    for col in type_rents:   # drop medians based on too few leases to be reliable
+        type_rents.loc[df[col.replace("rent_", "n_")] < MIN_LEASES, col] = None
+    df["rent"] = type_rents.min(axis=1)
+    df["rent_type"] = type_rents.fillna(1e9).idxmin(axis=1).map({c: s for s, c in TYPE_COLS.items()})
+    df.loc[df["rent"].isna(), "rent_type"] = None
+else:
+    df["rent"] = df[rent_col]
+    df["rent_type"] = rent_sheet
 
 # percentile scores across ALL areas (0-100, higher = better), robust to outliers
 df["score_afford"] = (1 - df["rent"].rank(pct=True)) * 100
@@ -87,6 +122,9 @@ if total_w == 0:
     st.stop()
 df["match"] = ((w_afford * df["score_afford"] + w_safety * df["score_safety"]
                 + w_stable * df["score_stable"]) / total_w).round(0)
+
+if not include_regional:
+    df = df[df["region"].isin(MELBOURNE_REGIONS)]
 
 mask = df["rent"].notna() & (df["rent"] <= budget)
 if regions:
@@ -123,13 +161,16 @@ if matches.empty:
 left, right = st.columns([3, 2], gap="large")
 
 with left:
-    centre = matches.geometry.union_all().centroid
-    m = folium.Map(location=[centre.y, centre.x], zoom_start=10, tiles="OpenStreetMap")
-    cmap = cm.LinearColormap(["#fee8c8", "#fdbb84", "#31a354", "#006d2c"],
-                             vmin=0, vmax=100, caption="Match score")
+    # zoom to the areas that fit the budget; panning is limited to Victoria
+    minx, miny, maxx, maxy = matches.total_bounds
+    m = folium.Map(tiles=BASEMAP, attr=BASEMAP_ATTR, min_zoom=7, max_zoom=15, zoom_snap=0.25,
+                   max_bounds=True, min_lat=-39.3, max_lat=-33.9, min_lon=140.8, max_lon=150.1)
+    m.fit_bounds([[miny, minx], [maxy, maxx]], padding=(15, 15))
+    cmap = cm.LinearColormap(["#fde0c5", "#facba6", "#74c476", "#006d2c"],
+                             vmin=0, vmax=100, caption="Match score (higher = better fit)")
 
     shown = matches.head(top_n)["rent_area"].tolist()
-    map_df = df[["rent_area", "rent", "crime_per_1000", "rent_change_5y_pct", "match",
+    map_df = df[["rent_area", "rent", "rent_type", "crime_per_1000", "rent_change_5y_pct", "match",
                  "geometry"]].copy()
     map_df["in_budget"] = mask
     map_df["top"] = map_df["rent_area"].isin(shown)
@@ -137,20 +178,21 @@ with left:
     folium.GeoJson(
         map_df,
         style_function=lambda f: {
-            "fillColor": cmap(f["properties"]["match"]) if f["properties"]["in_budget"] else "#d9d9d9",
-            "color": "#222" if f["properties"]["top"] else "white",
-            "weight": 2 if f["properties"]["top"] else 0.6,
-            "fillOpacity": 0.8 if f["properties"]["in_budget"] else 0.35,
+            "fillColor": cmap(f["properties"]["match"]) if f["properties"]["in_budget"] else "#9e9e9e",
+            "color": "#111" if f["properties"]["top"] else "#555",
+            "weight": 2.5 if f["properties"]["top"] else 0.7,
+            "fillOpacity": 0.85 if f["properties"]["in_budget"] else 0.45,
         },
         highlight_function=lambda f: {"weight": 3, "color": "#000"},
         tooltip=folium.GeoJsonTooltip(
-            fields=["rent_area", "rent", "crime_per_1000", "rent_change_5y_pct", "match"],
-            aliases=["Area", "Median rent ($/wk)", "Crime per 1,000",
+            fields=["rent_area", "rent", "rent_type", "crime_per_1000", "rent_change_5y_pct", "match"],
+            aliases=["Area", "Median rent ($/wk)", "Home type", "Crime per 1,000",
                      "Rent change 5 yrs (%)", "Match score"],
             localize=True, sticky=True),
     ).add_to(m)
     cmap.add_to(m)
-    st.caption("Grey = over budget · outlined = in your top results · hover for details")
+    st.caption("🟩 Coloured = within budget (greener = better match) · ⬜ Grey = over budget · "
+               "**bold outline** = your top results · blank map = no rent data · hover for details")
     st_folium(m, height=560, use_container_width=True, returned_objects=[])
 
 with right:
@@ -163,6 +205,8 @@ with right:
             b.metric("Match", f"{r.match:.0f}")
             x, y, z = st.columns(3)
             x.metric("Rent /wk", f"${r.rent:.0f}")
+            n = getattr(r, "n_" + r.rent_type.lower().replace(" ", "_"))
+            x.caption(f"{r.rent_type} · {n:,.0f} leases" + (" ⚠️ few" if n < MIN_LEASES else ""))
             y.metric("Crime /1k", f"{r.crime_per_1000:.0f}",
                      f"{r.crime_change_1y_pct:+.0f}% 1yr", delta_color="inverse")
             z.metric("Rent 5yr", f"{r.rent_change_5y_pct:+.0f}%")
@@ -182,8 +226,9 @@ st.caption(f"Includes: {', '.join(suburbs)} · Population {row['population_2021'
 
 d1, d2 = st.columns(2)
 with d1:
-    st.markdown(f"**Median weekly rent: {rent_sheet.lower()}**")
-    hist = rent[(rent["rent_area"] == pick) & (rent["dwelling_type"] == rent_sheet)]
+    pick_type = row["rent_type"]
+    st.markdown(f"**Median weekly rent: {pick_type.lower()}**")
+    hist = rent[(rent["rent_area"] == pick) & (rent["dwelling_type"] == pick_type)]
     st.line_chart(hist.set_index("quarter")["median_rent"], height=280, y_label="$ per week")
 with d2:
     st.markdown("**Crime incidents per year (to June)**")
@@ -195,11 +240,13 @@ with d2:
 
 with st.expander("How the match score works"):
     st.markdown(
-        "1. **Filter**: keep areas whose median rent for your home type is within budget.\n"
+        "1. **Filter**: keep areas whose median rent for your home type is within budget. "
+        "With *Cheapest available*, each area uses its cheapest home type, ignoring types "
+        f"with fewer than {MIN_LEASES} new leases in the past year (too few to be reliable).\n"
         "2. **Score**: each area gets a 0–100 score for affordability (cheaper rent), safety "
         "(fewer incidents per 1,000 residents) and rent stability (smaller 5-year rise), "
         "based on its rank among all 146 areas.\n"
-        "3. **Weight**: scores are combined using your sliders.\n\n"
+        "3. **Weight**: scores are combined using the importance you set for each factor.\n\n"
         "**Limitations:** rent figures are area medians, not individual listings. Crime rates "
         "use 2021 population. Some areas group several suburbs, and suburbs not listed in "
         "the rent report aren't included."
