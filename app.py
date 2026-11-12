@@ -158,6 +158,18 @@ if matches.empty:
 # ---------------------------------------------------------------------------
 # Map + ranked list
 # ---------------------------------------------------------------------------
+shown = matches.head(top_n)["rent_area"].tolist()
+if st.session_state.get("selected") not in shown:   # filters changed -> clear selection
+    st.session_state["selected"] = None
+selected = st.session_state["selected"]
+
+
+def toggle_selected(area):
+    st.session_state["selected"] = None if st.session_state.get("selected") == area else area
+    if st.session_state["selected"]:
+        st.session_state["detail_pick"] = area   # also open it in Area details
+
+
 left, right = st.columns([3, 2], gap="large")
 
 with left:
@@ -174,18 +186,18 @@ with left:
     cmap = cm.LinearColormap(["#fde0c5", "#facba6", "#74c476", "#006d2c"],
                              vmin=0, vmax=100, caption="Match score (higher = better fit)")
 
-    shown = matches.head(top_n)["rent_area"].tolist()
     map_df = df[["rent_area", "rent", "rent_type", "crime_per_1000", "rent_change_5y_pct", "match",
                  "geometry"]].copy()
     map_df["in_budget"] = mask
-    map_df["top"] = map_df["rent_area"].isin(shown)
+    # outline only the chosen area, or all top results if none is chosen
+    map_df["top"] = (map_df["rent_area"] == selected) if selected else map_df["rent_area"].isin(shown)
 
     folium.GeoJson(
         map_df,
         style_function=lambda f: {
             "fillColor": cmap(f["properties"]["match"]) if f["properties"]["in_budget"] else "#9e9e9e",
             "color": "#111" if f["properties"]["top"] else "#555",
-            "weight": 2.5 if f["properties"]["top"] else 0.7,
+            "weight": (4 if selected else 2.5) if f["properties"]["top"] else 0.7,
             "fillOpacity": 0.85 if f["properties"]["in_budget"] else 0.45,
         },
         highlight_function=lambda f: {"weight": 3, "color": "#000"},
@@ -201,7 +213,8 @@ with left:
         "vertical-align:middle;border-radius:3px;background:linear-gradient(90deg,"
         "#fde0c5,#facba6,#74c476,#006d2c)'></span> 100 &nbsp;·&nbsp; "
         "<span style='display:inline-block;width:12px;height:10px;background:#9e9e9e;"
-        "vertical-align:middle'></span> over budget &nbsp;·&nbsp; bold outline = top results"
+        "vertical-align:middle'></span> over budget &nbsp;·&nbsp; bold outline = "
+        + (f"<b>{selected}</b>" if selected else "top results") +
         " &nbsp;·&nbsp; blank = no rent data</div>", unsafe_allow_html=True)
     st_folium(m, height=560, use_container_width=True, returned_objects=[])
 
@@ -222,14 +235,19 @@ with right:
 </div>
 <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px;margin-top:6px">
   <div><span style="font-size:0.75rem;color:gray">Rent /wk</span><br>
-    <span style="font-size:1.25rem;font-weight:600">${r.rent:.0f}</span><br>
-    <span style="font-size:0.75rem;color:gray">{r.rent_type} · {n:,.0f} leases{few}</span></div>
+    <span style="font-size:1.25rem;font-weight:600">${r.rent:.0f}</span></div>
   <div><span style="font-size:0.75rem;color:gray">Crime /1k</span><br>
     <span style="font-size:1.25rem;font-weight:600">{r.crime_per_1000:.0f}</span><br>
     <span style="font-size:0.75rem;color:{colour}">{arrow} {abs(crime_trend):.0f}% in 1 yr</span></div>
   <div><span style="font-size:0.75rem;color:gray">Rent 5 yrs</span><br>
     <span style="font-size:1.25rem;font-weight:600">{r.rent_change_5y_pct:+.0f}%</span></div>
-</div>""", unsafe_allow_html=True)
+</div>
+<div style="font-size:0.78rem;color:gray;margin-top:4px">{r.rent_type} · {n:,.0f} leases in the past year{few}</div>""",
+                        unsafe_allow_html=True)
+            is_sel = r.rent_area == selected
+            st.button("📍 Shown on map · click to show all" if is_sel else "📍 Show on map",
+                      key=f"sel_{r.rent_area}", on_click=toggle_selected, args=(r.rent_area,),
+                      type="primary" if is_sel else "secondary", use_container_width=True)
             if r.crime_per_1000 > CENTRE_THRESHOLD:
                 st.caption("⚠️ Busy town/city centre: visitors inflate the per-resident crime rate.")
 
@@ -239,7 +257,9 @@ with right:
 # ---------------------------------------------------------------------------
 st.divider()
 st.subheader("Area details")
-pick = st.selectbox("Choose an area", matches["rent_area"].tolist())
+if st.session_state.get("detail_pick") not in matches["rent_area"].tolist():
+    st.session_state["detail_pick"] = matches["rent_area"].iloc[0]
+pick = st.selectbox("Choose an area", matches["rent_area"].tolist(), key="detail_pick")
 row = df[df["rent_area"] == pick].iloc[0]
 suburbs = lookup.loc[lookup["rent_area"] == pick, "suburb"].tolist()
 st.caption(f"Includes: {', '.join(suburbs)} · Population {row['population_2021']:,.0f} (2021)")
