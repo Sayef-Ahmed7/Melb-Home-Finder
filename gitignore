@@ -12,3 +12,9 @@ venv/
 ~$*.xlsx
 .DS_Store
 Thumbs.db
+
+# big ABS download - prepare_boundaries.py turns it into vic_suburbs.geojson
+data/boundaries/*.zip
+
+# generated maps
+maps/
